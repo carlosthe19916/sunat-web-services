@@ -18,123 +18,92 @@ package io.github.project.openubl.xmlsenderws.webservices.wrappers;
 
 import org.apache.cxf.configuration.jsse.TLSClientParameters;
 import org.apache.cxf.endpoint.Client;
-import org.apache.cxf.endpoint.Endpoint;
 import org.apache.cxf.frontend.ClientProxy;
-import org.apache.cxf.interceptor.LoggingInInterceptor;
-import org.apache.cxf.interceptor.LoggingOutInterceptor;
 import org.apache.cxf.jaxws.JaxWsProxyFactoryBean;
 import org.apache.cxf.transport.http.HTTPConduit;
 import org.apache.cxf.transports.http.configuration.HTTPClientPolicy;
 import org.apache.cxf.ws.security.wss4j.WSS4JOutInterceptor;
+import org.apache.wss4j.common.ConfigurationConstants;
+import org.apache.wss4j.common.ext.WSPasswordCallback;
+import org.apache.wss4j.dom.handler.WSHandlerConstants;
 
+import javax.security.auth.callback.Callback;
+import javax.security.auth.callback.CallbackHandler;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class SunatServiceFactory {
 
-    private static final long DEFAULT_CLIENT_CONNECTION_TIMEOUT = 30_000L;
-    private static final long DEFAULT_CLIENT_RECEIVE_TIMEOUT = 15_000L;
-
-    private static final Map<Class<?>, Map<ServiceConfig, Object>> classCache = Collections.synchronizedMap(new LinkedHashMap<>());
+    private final static Map<ServiceConfig, Map<Class<?>, Object>> instances = Collections.synchronizedMap(new CacheLinkedHashMap<>());
 
     private SunatServiceFactory() {
         // Just static methods
     }
 
     public static <T> T getInstance(Class<T> serviceClass, ServiceConfig config) {
-        if (!classCache.containsKey(serviceClass)) {
-            classCache.put(serviceClass, Collections.synchronizedMap(new LinkedHashMap<ServiceConfig, Object>() {
-                @Override
-                protected boolean removeEldestEntry(Map.Entry<ServiceConfig, Object> eldest) {
-                    String maxSize = System.getenv("WS_SUNAT_CACHE_MAX_SIZE");
-                    int MAX_SIZE = maxSize != null ? Integer.parseInt(maxSize) : Integer.MAX_VALUE;
-                    return size() > MAX_SIZE;
-                }
-            }));
-        }
-        Map<ServiceConfig, Object> instancesCache = classCache.get(serviceClass);
-        if (!instancesCache.containsKey(config)) {
-            T instance = initInstance(serviceClass, config);
-            instancesCache.put(config, instance);
+        instances.putIfAbsent(config, new ConcurrentHashMap<>());
+
+        if (!instances.get(config).containsKey(serviceClass)) {
+            T t = createWsService(serviceClass, config);
+            instances.get(config).putIfAbsent(serviceClass, t);
         }
 
-        return (T) instancesCache.get(config);
+        return (T) instances.get(config).get(serviceClass);
     }
 
-    private static <T> T initInstance(Class<T> serviceClass, ServiceConfig config) {
+    private static <T> T createWsService(Class<T> serviceClass, ServiceConfig config) {
         JaxWsProxyFactoryBean factory = new JaxWsProxyFactoryBean();
         factory.setServiceClass(serviceClass);
-
-        /*
-         * Address
-         */
         factory.setAddress(config.getUrl());
 
-        /*
-         * Logging
-         */
+        // Auth
+        WSS4JOutInterceptor wss4JOutInterceptor = configAuth(config.getUsername(), config.getPassword());
+        factory.getOutInterceptors().add(wss4JOutInterceptor);
 
-        String enableLogging = System.getenv("WS_SUNAT_LOGGING");
-        if (enableLogging != null && enableLogging.equalsIgnoreCase("true")) {
-            factory.getInInterceptors().add(new LoggingInInterceptor());
-            factory.getOutInterceptors().add(new LoggingOutInterceptor());
-        }
+        // Create client
+        T t = factory.create(serviceClass);
 
-        T client = (T) factory.create();
-        defineTimeouts(client);
-        configSecurity(client, config.getUsername(), config.getPassword());
+        // Http policy
+        configHttpPolicy(t);
 
-        return client;
+        return t;
     }
 
-    private static void defineTimeouts(Object serviceClass) {
-        Client cxfClient = ClientProxy.getClient(serviceClass);
-        HTTPConduit httpConduit = (HTTPConduit) cxfClient.getConduit();
+    private static WSS4JOutInterceptor configAuth(String username, String password) {
+        Map<String, Object> outProps = new HashMap<>();
+        outProps.put(ConfigurationConstants.ACTION, WSHandlerConstants.USERNAME_TOKEN);
+        outProps.put(ConfigurationConstants.PASSWORD_TYPE, "PasswordText");
 
+        outProps.put(ConfigurationConstants.USER, username);
+        outProps.put(ConfigurationConstants.PW_CALLBACK_REF, (CallbackHandler) callbacks -> {
+            for (Callback callback : callbacks) {
+                WSPasswordCallback wpc = (WSPasswordCallback) callback;
+                wpc.setPassword(password);
+            }
+        });
+
+        return new WSS4JOutInterceptor(outProps);
+    }
+
+    private static void configHttpPolicy(Object serviceClass) {
+        Client client = ClientProxy.getClient(serviceClass);
+        HTTPConduit conduit = (HTTPConduit) client.getConduit();
+
+        // TSL config
         TLSClientParameters tlsParams = new TLSClientParameters();
         tlsParams.setDisableCNCheck(true);
-        httpConduit.setTlsClientParameters(tlsParams);
 
-        HTTPClientPolicy httpClientPolicy = new HTTPClientPolicy();
+        conduit.setTlsClientParameters(tlsParams);
 
+        // HTTP policy
+        HTTPClientPolicy policy = new HTTPClientPolicy();
+        policy.setConnectionTimeout(30_000L);
+        policy.setReceiveTimeout(15_000L);
+        policy.setAllowChunking(false);
 
-        String connectionTimeout = System.getenv("WS_SUNAT_CLIENT_CONNECTION_TIMEOUT");
-        String receiveTimeout = System.getenv("WS_SUNAT_CLIENT_RECEIVE_TIMEOUT");
-
-        httpClientPolicy.setConnectionTimeout(connectionTimeout != null ? Long.parseLong(connectionTimeout) : DEFAULT_CLIENT_CONNECTION_TIMEOUT);
-        httpClientPolicy.setReceiveTimeout(receiveTimeout != null ? Long.parseLong(receiveTimeout) : DEFAULT_CLIENT_RECEIVE_TIMEOUT);
-
-        httpClientPolicy.setAllowChunking(false);
-        httpConduit.setClient(httpClientPolicy);
-    }
-
-    private static <T> void configSecurity(T t, String username, String password) {
-        /*
-         * Define the configuration properties
-         */
-        Map<String, Object> outProps = new HashMap<>();
-        outProps.put("action", "UsernameToken");
-        outProps.put("passwordType", "PasswordText");
-
-        /*
-         * The username ('admin') is provided as a literal, the corresponding password will be determined by the client
-         * password callback object.
-         */
-        outProps.put("user", username);
-        outProps.put("passwordCallbackClass", SunatServicePasswordCallback.class.getName());
-
-        /*
-         * Save user password on memory
-         */
-        SunatServicePasswordCallback.PASSWORDS.putIfAbsent(username, password);
-
-        Client client = ClientProxy.getClient(t);
-        Endpoint cxfEnpoint = client.getEndpoint();
-
-        WSS4JOutInterceptor wssOut = new WSS4JOutInterceptor(outProps);
-        cxfEnpoint.getOutInterceptors().add(wssOut);
+        conduit.setClient(policy);
     }
 
 }

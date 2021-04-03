@@ -16,22 +16,20 @@
  */
 package io.github.project.openubl.xmlsenderws.webservices.wrappers;
 
-import org.apache.wss4j.common.ext.WSPasswordCallback;
-
-import javax.security.auth.callback.Callback;
-import javax.security.auth.callback.CallbackHandler;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
-public class SunatServicePasswordCallback implements CallbackHandler {
+public class CacheLinkedHashMap<K, V> extends LinkedHashMap<K, V> {
 
-    protected static final Map<String, String> PASSWORDS = new ConcurrentHashMap<>();
+    private static final int MAX_ENTRIES = 1000;
+
+    public CacheLinkedHashMap() {
+        super();
+    }
 
     @Override
-    public void handle(Callback[] callbacks) {
-        WSPasswordCallback passwordCallback = (WSPasswordCallback) callbacks[0];
-        String user = passwordCallback.getIdentifier();
-        passwordCallback.setPassword(PASSWORDS.get(user));
+    protected boolean removeEldestEntry(Map.Entry eldest) {
+        return size() > MAX_ENTRIES;
     }
 
 }
