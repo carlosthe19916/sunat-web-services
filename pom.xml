@@ -23,7 +23,7 @@
 
     <groupId>io.github.project-openubl</groupId>
     <artifactId>xsender</artifactId>
-    <version>3.0.4-SNAPSHOT</version>
+    <version>4.0.0-SNAPSHOT</version>
 
     <name>XSender :: Parent</name>
     <description>Java library for sending XML files to SUNAT</description>
